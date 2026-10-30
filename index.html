@@ -145,9 +145,11 @@ details{margin-top:6px}summary{cursor:pointer;color:var(--mut)}
 <!-- RUN -->
 <div id="run" class="tab">
   <div class="grid" style="margin-bottom:12px">
-    <div class="card"><div class="mut">Distance</div><div class="big" id="rdist">0.00 km</div></div>
+    <div class="card"><div class="mut">Distance (total path)</div><div class="big" id="rdist">0.00 km</div></div>
     <div class="card"><div class="mut">Time</div><div class="big" id="rtime">00:00</div></div>
     <div class="card"><div class="mut">Pace needed</div><div class="big" id="rpace">--</div></div>
+    <div class="card"><div class="mut">Average pace</div><div class="big" id="ravg">--</div></div>
+    <div class="card"><div class="mut">Loops</div><div class="big" id="rlap">0</div></div>
     <div class="card"><div class="mut">Status</div><div class="big" id="rstat" style="font-size:18px">READY</div></div>
   </div>
   <div class="card">
@@ -158,6 +160,7 @@ details{margin-top:6px}summary{cursor:pointer;color:var(--mut)}
     </div>
     <canvas id="route"></canvas>
     <div class="mut" id="gps">Works offline. Wait for “GPS ready” (outdoors, clear sky) before you start.</div>
+    <p class="mut" style="margin-top:8px">Distance adds up everything you run, so loops and laps all count. It is smoothed like Strava, but GPS can still be a few percent off on tight tracks.</p>
   </div>
 </div>
 
@@ -572,7 +575,7 @@ function onGpsErr(e){
 }
 
 /* ---------- run ---------- */
-let R={on:false,pts:[],dist:0,km:0,heading:0};
+let R={on:false,pts:[],dist:0,km:0,heading:0,laps:0};
 const hav=(a,b)=>{const r=Math.PI/180,dl=(b.la-a.la)*r,dn=(b.lo-a.lo)*r,q=Math.sin(dl/2)**2+Math.cos(a.la*r)*Math.cos(b.la*r)*Math.sin(dn/2)**2;return 12742*Math.asin(Math.sqrt(q))};
 const brg=(a,b)=>{const r=Math.PI/180,y=Math.sin((b.lo-a.lo)*r)*Math.cos(b.la*r),x=Math.cos(a.la*r)*Math.sin(b.la*r)-Math.sin(a.la*r)*Math.cos(b.la*r)*Math.cos((b.lo-a.lo)*r);return(Math.atan2(y,x)/r+360)%360};
 
@@ -596,28 +599,46 @@ async function startRun(){
       {ok:'Start anyway',cancel:'Keep waiting',icon:'📡'});
     if(!go){R.starting=false;return}
   }
-  R={on:true,t0:Date.now(),pts:[],dist:0,km:0,heading:0};
+  R={on:true,t0:Date.now(),pts:[],dist:0,km:0,heading:0,laps:0,lapAt:0,away:false,k:null,start:null,rej:0};
   R.tick=setInterval(tick,500);
   keepAwake();
   $('rbtn').textContent='■ Stop run';$('rbtn').className='stop';
   say('Starting your 3.2 kilometer run. Keep a steady pace.');
   tick();
 }
+/* Distance = sum of every small step along your path (laps and loops all add up).
+   Raw GPS dots are smoothed with a small Kalman-style filter, weighted by reported accuracy. */
 function onPos(p){
   const c=p.coords;
   G.acc=c.accuracy;G.t=Date.now();setG();
   if(!R.on)return;
   $('gps').textContent='Tracking, GPS ±'+Math.round(c.accuracy)+' m';
-  if(c.accuracy>25)return;
-  const n={la:c.latitude,lo:c.longitude,t:Date.now()},l=R.pts[R.pts.length-1];
-  if(l){
-    const d=hav(l,n),dt=(n.t-l.t)/1000;
-    if(d<0.004)return;
-    if(dt>0&&d*1000/dt>12)return;
-    R.dist+=d;
-    R.heading=Number.isFinite(c.heading)?c.heading:brg(l,n);
+  if(c.accuracy>20)return;
+  const t=Date.now(),raw={la:c.latitude,lo:c.longitude};
+  if(!R.k){
+    R.k={la:raw.la,lo:raw.lo,v:c.accuracy*c.accuracy,t};
+    R.pts.push({la:raw.la,lo:raw.lo,t});
+    R.start={la:raw.la,lo:raw.lo};
+    return;
   }
+  const K=R.k,dt=Math.max(.2,(t-K.t)/1000);
+  if(R.rej<5&&hav(K,raw)*1000/dt>12){R.rej++;return}
+  R.rej=0;
+  K.v+=dt*9;
+  const g=K.v/(K.v+c.accuracy*c.accuracy);
+  K.la+=g*(raw.la-K.la);K.lo+=g*(raw.lo-K.lo);K.v=(1-g)*K.v;K.t=t;
+  const n={la:K.la,lo:K.lo,t},l=R.pts[R.pts.length-1];
+  const d=hav(l,n),slow=Number.isFinite(c.speed)&&c.speed<0.5;
+  if(d*1000<Math.max(2.5,c.accuracy*.3)||(slow&&d*1000<8))return;
+  R.dist+=d;
+  R.heading=(Number.isFinite(c.heading)&&c.speed>1)?c.heading:brg(l,n);
   R.pts.push(n);
+  const ds=hav(n,R.start)*1000;
+  if(ds>80)R.away=true;
+  if(R.away&&ds<25&&R.dist-R.lapAt>.15){
+    R.laps++;R.lapAt=R.dist;R.away=false;
+    say('Loop '+R.laps+' complete.');
+  }
   const k=Math.floor(R.dist);
   if(k>R.km&&k<3){R.km=k;const e=Date.now()-R.t0;say(k+' kilometer done. Time '+Math.floor(e/60000)+' minutes '+Math.floor(e/1000%60)+' seconds.')}
   if(R.dist>=3.2)endRun(true);
@@ -627,6 +648,8 @@ function tick(){
   const el=(Date.now()-R.t0)/1000,T=S.targets.run,rem=3.2-R.dist;
   $('rtime').textContent=mmss(el);
   $('rdist').textContent=R.dist.toFixed(2)+' km';
+  $('rlap').textContent=R.laps;
+  $('ravg').textContent=R.dist>0.05?mmss(el/R.dist)+'/km':'--';
   if(rem>0&&T-el>0)$('rpace').textContent=mmss((T-el)/rem)+'/km';
   else $('rpace').textContent=T-el<=0?'Over time':'--';
   const ok=R.dist>=el*3.2/T;
@@ -657,13 +680,13 @@ async function endRun(auto){
         <div class="tile"><span class="mut">Distance</span><b>${dist.toFixed(2)} km</b></div>
         <div class="tile"><span class="mut">Time</span><b>${mmss(sec)}</b></div>
         <div class="tile"><span class="mut">Average pace</span><b>${mmss(sec/dist)}/km</b></div>
-        <div class="tile"><span class="mut">Target</span><b>${mmss(T)}</b></div></div>
+        <div class="tile"><span class="mut">Loops</span><b>${R.laps}</b></div></div>
         <div class="note ${note[0]}">${esc(note[1])}</div>`,
       dismiss:false,dv:'discard',
       actions:[{label:'Discard',val:'discard'},{label:'Save run',cls:'pri',val:'save'}]
     });
     if(r==='save'){
-      S.logs.unshift({id:Date.now(),ts:new Date().toISOString(),cat:'run',val:dist,sec,notes:full?'GPS run, completed 3.2 km':'GPS run, stopped early'});
+      S.logs.unshift({id:Date.now(),ts:new Date().toISOString(),cat:'run',val:dist,sec,notes:(full?'GPS run, completed 3.2 km':'GPS run, stopped early')+(R.laps?', '+R.laps+' loops':'')});
       save();renderAll();toast('Run saved','green');break;
     }
     if(await uiConfirm('Discard this run?','Your time and distance will be lost.',{ok:'Discard',cancel:'Go back',danger:true,icon:'🗑'})){toast('Run discarded');break}
