@@ -35,6 +35,8 @@ canvas{width:100%;display:block}
 .pill{padding:2px 8px;border-radius:9px;font-size:11px;font-weight:700;background:var(--line);white-space:nowrap}
 .pill.g{background:#10b9812a;color:#6ee7b7}.pill.y{background:#f59e0b2a;color:#fcd34d}.pill.r{background:#f43f5e2a;color:#fda4af}
 details{margin-top:6px}summary{cursor:pointer;color:var(--mut)}
+.chk{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)}
+.chk:last-of-type{border-bottom:0}
 
 /* ---------- MODAL SYSTEM ---------- */
 .mb{position:fixed;inset:0;z-index:100;display:flex;align-items:flex-end;justify-content:center;
@@ -110,6 +112,7 @@ details{margin-top:6px}summary{cursor:pointer;color:var(--mut)}
 
 <!-- HOME -->
 <div id="home" class="tab on">
+  <div class="card" id="today"></div>
   <div class="card">
     <div class="row">
       <div><h2>Readiness</h2><div class="mut" id="who"></div></div>
@@ -216,6 +219,19 @@ details{margin-top:6px}summary{cursor:pointer;color:var(--mut)}
     <label style="display:flex;gap:8px;align-items:center;margin-top:12px"><input id="vc" type="checkbox" style="width:auto"> Voice, beeps &amp; vibration</label>
     <button class="pri" style="width:100%;margin-top:10px" onclick="saveSetup()">Save</button>
   </div>
+
+  <div class="card">
+    <h2>🔔 Daily reminder</h2>
+    <p class="mut">Daily goal: at least push-ups and sit-ups. You are only reminded if you haven’t logged both today.</p>
+    <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input id="rm-on" type="checkbox" style="width:auto" onchange="saveReminder()"> Remind me every day</label>
+    <label for="rm-time">Reminder time</label>
+    <input id="rm-time" type="time" value="18:00" onchange="saveReminder()">
+    <div class="note ok" style="margin:12px 0">Most reliable on any phone, even when the app is closed: add a repeating reminder to your phone’s calendar.</div>
+    <button class="pri" style="width:100%" onclick="downloadICS()">📅 Add repeating reminder to calendar</button>
+    <button style="width:100%;margin-top:8px" onclick="testNotify()">🔔 Turn on / test app notifications</button>
+    <p class="mut" style="margin-top:10px">App notifications only appear while the app is open or running in the background. On iPhone they need “Add to Home Screen” first.</p>
+  </div>
+
   <div class="card">
     <h2>Backup</h2>
     <p class="mut">Your data is stored only in this browser. Back it up now and then.</p>
@@ -256,12 +272,12 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const mmss=t=>{t=Math.max(0,Math.round(t));return String(Math.floor(t/60)).padStart(2,'0')+':'+String(t%60).padStart(2,'0')};
 const parseT=s=>{const m=/^(\d{1,3}):([0-5]\d)$/.exec((s||'').trim());return m?+m[1]*60+ +m[2]:null};
 const NAMES={pushups:'Push-ups',situps:'Sit-ups',run:'3.2 km run',plank:'Plank'};
-const DEF={profile:{sex:'',age:''},targets:{push:47,sit:55,run:1094},voice:true,seen:false,logs:[]};
+const DEF={profile:{sex:'',age:''},targets:{push:47,sit:55,run:1094},voice:true,seen:false,remind:{on:true,time:'18:00',last:''},logs:[]};
 
 function load(){
   try{
     const o=JSON.parse(localStorage.getItem(KEY))||{};
-    return {...DEF,...o,targets:{...DEF.targets,...o.targets},profile:{...DEF.profile,...o.profile},logs:Array.isArray(o.logs)?o.logs:[]};
+    return {...DEF,...o,targets:{...DEF.targets,...o.targets},profile:{...DEF.profile,...o.profile},remind:{...DEF.remind,...o.remind},logs:Array.isArray(o.logs)?o.logs:[]};
   }catch(e){return JSON.parse(JSON.stringify(DEF))}
 }
 let S=load();
@@ -283,7 +299,10 @@ function buzz(ms){if(S.voice&&navigator.vibrate)navigator.vibrate(ms)}
 let wakeLock=null;
 async function keepAwake(){try{if(navigator.wakeLock)wakeLock=await navigator.wakeLock.request('screen')}catch(e){}}
 function release(){try{wakeLock&&wakeLock.release()}catch(e){};wakeLock=null}
-document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&(R.on||M.active))keepAwake()});
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible'&&(R.on||M.active))keepAwake();
+  if(document.visibilityState==='visible')checkReminder();
+});
 
 /* ---------- toast ---------- */
 let tt;
@@ -370,6 +389,111 @@ function show(id){
 }
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>show(b.dataset.t));
 
+/* ---------- daily goal, streak & reminders ---------- */
+const pad2=n=>String(n).padStart(2,'0');
+const dayKey=d=>{const x=new Date(d);return x.getFullYear()+'-'+pad2(x.getMonth()+1)+'-'+pad2(x.getDate())};
+function doneToday(){
+  const k=dayKey(Date.now());let push=0,sit=0;
+  S.logs.forEach(l=>{if(dayKey(l.ts)!==k)return;if(l.cat==='pushups')push+=+l.val||0;if(l.cat==='situps')sit+=+l.val||0});
+  return {push,sit};
+}
+function streak(){
+  const P=new Set(),Q=new Set();
+  S.logs.forEach(l=>{if(+l.val>0){const k=dayKey(l.ts);if(l.cat==='pushups')P.add(k);if(l.cat==='situps')Q.add(k)}});
+  const ok=d=>P.has(dayKey(d))&&Q.has(dayKey(d));
+  const d=new Date();let n=0;
+  if(!ok(d))d.setDate(d.getDate()-1);
+  while(ok(d)){n++;d.setDate(d.getDate()-1)}
+  return n;
+}
+function renderToday(){
+  const d=doneToday(),n=streak(),all=d.push>0&&d.sit>0;
+  const row=(ok,label,v)=>`<div class="chk"><span>${ok?'✅':'⬜'} ${label}</span><span class="mut">${ok?v+' reps today':'not done yet'}</span></div>`;
+  $('today').innerHTML=
+    `<div class="row" style="margin-bottom:4px"><h2 style="margin:0">Today’s minimum</h2><span class="pill ${n?'g':''}">🔥 ${n}-day streak</span></div>`+
+    row(d.push>0,'Push-ups',d.push)+row(d.sit>0,'Sit-ups',d.sit)+
+    (all?'<div class="note ok" style="margin-top:8px">Daily goal done. Nice work!</div>'
+        :`<div class="row" style="margin-top:10px"><button class="pri" style="flex:1" onclick="show('mock')">Start mock test</button><button style="flex:1" onclick="openEntry()">Log reps</button></div>`);
+}
+async function notify(title,body){
+  if(!('Notification' in window)||Notification.permission!=='granted')return false;
+  try{
+    const reg=('serviceWorker' in navigator)?await navigator.serviceWorker.getRegistration():null;
+    if(reg&&reg.showNotification){await reg.showNotification(title,{body,tag:'pcg-daily',vibrate:[120,60,120]});return true}
+    new Notification(title,{body,tag:'pcg-daily'});return true;
+  }catch(e){return false}
+}
+async function enableAlerts(){
+  const ios=/iphone|ipad|ipod/i.test(navigator.userAgent);
+  if(!('Notification' in window)){
+    uiAlert('Notifications not available here',ios?'On iPhone, notifications only work after you tap Share, then Add to Home Screen, and open the app from its icon (iOS 16.4 or newer). Use the calendar reminder in the meantime.':'This browser does not support notifications. Use the calendar reminder instead.','amber','🔔');
+    return false;
+  }
+  if(Notification.permission==='denied'){
+    uiAlert('Notifications are blocked','Allow notifications for this app in your phone or browser site settings, then try again.','red','🔔');
+    return false;
+  }
+  if(Notification.permission!=='granted'){
+    const r=await Notification.requestPermission();
+    if(r!=='granted'){toast('Notifications not allowed','red');return false}
+  }
+  return true;
+}
+async function testNotify(){
+  if(!(await enableAlerts()))return;
+  const ok=await notify('PCG PFT test','Reminders will look like this.');
+  toast(ok?'Test notification sent':'Could not show a notification',ok?'green':'red');
+}
+let chk=false;
+async function checkReminder(){
+  if(chk||!S.remind.on||R.on||M.active||MD.open)return;
+  const now=new Date(),p=(S.remind.time||'18:00').split(':'),due=new Date();
+  due.setHours(+p[0],+p[1],0,0);
+  if(now<due)return;
+  const key=dayKey(now);
+  if(S.remind.last===key)return;
+  const d=doneToday();
+  if(d.push>0&&d.sit>0){S.remind.last=key;save();return}
+  const need=[d.push>0?'':'push-ups',d.sit>0?'':'sit-ups'].filter(Boolean).join(' and ');
+  const msg='Your daily minimum: '+need+' still to do today. Even a short set counts.';
+  chk=true;
+  try{
+    if(document.visibilityState==='hidden'){
+      if(await notify('Time to train',msg)){S.remind.last=key;save()}
+      return;
+    }
+    S.remind.last=key;save();
+    const r=await modal({icon:'⏰',tone:'amber',title:'Time to train',sub:'Daily reminder',
+      html:`<p class="mp">${esc(msg)}</p>`,
+      actions:[{label:'Later',val:'later'},{label:'Start mock test',cls:'pri',val:'go'}],dv:'later'});
+    if(r==='go')show('mock');
+  }finally{chk=false}
+}
+function saveReminder(){
+  S.remind.on=$('rm-on').checked;
+  S.remind.time=$('rm-time').value||'18:00';
+  S.remind.last='';
+  save();
+  toast(S.remind.on?'Reminder set for '+S.remind.time:'Reminder turned off');
+}
+function icsDate(d){return d.getFullYear()+pad2(d.getMonth()+1)+pad2(d.getDate())+'T'+pad2(d.getHours())+pad2(d.getMinutes())+'00'}
+async function downloadICS(){
+  const t=($('rm-time').value||'18:00').split(':');
+  const s=new Date();s.setHours(+t[0],+t[1],0,0);
+  if(s<new Date())s.setDate(s.getDate()+1);
+  const stamp=new Date().toISOString().replace(/[-:]/g,'').replace(/\.\d{3}/,'');
+  const lines=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//PCG PFT Tracker//EN','CALSCALE:GREGORIAN','BEGIN:VEVENT',
+    'UID:pcg-pft-daily-reminder@pcg-pft','DTSTAMP:'+stamp,'DTSTART:'+icsDate(s),'DURATION:PT15M','RRULE:FREQ=DAILY',
+    'SUMMARY:PCG PFT: do your push-ups and sit-ups',
+    'DESCRIPTION:Daily goal: at least push-ups and sit-ups. Open the PCG PFT Tracker and log your reps.',
+    'BEGIN:VALARM','ACTION:DISPLAY','DESCRIPTION:PCG PFT daily training','TRIGGER:PT0M','END:VALARM','END:VEVENT','END:VCALENDAR'];
+  dl('PCG_PFT_daily_reminder.ics','text/calendar',lines.join('\r\n'));
+  await modal({icon:'📅',tone:'blue',title:'Almost done',sub:'Finish adding the reminder',
+    html:`<ol class="list"><li>Open the downloaded file (check your Downloads or the browser’s download list).</li><li>Tap <b>Add</b> or <b>Save</b> in your calendar.</li><li>It repeats every day at ${esc($('rm-time').value||'18:00')}.</li></ol>
+    <p class="mut" style="margin-top:10px">If you change the time later, delete the old calendar event first. If the file won’t open, set a repeating alarm in your Clock app instead.</p>`,
+    actions:[{label:'Got it',cls:'pri',val:true}],dv:true});
+}
+
 /* ---------- home ---------- */
 function best(){
   const L=S.logs,mx=c=>Math.max(0,...L.filter(l=>l.cat===c).map(l=>+l.val||0));
@@ -382,6 +506,7 @@ function meter(label,val,tgt,pct,color){
   <div class="bar"><i style="width:${pct}%;background:${color}"></i></div></div>`;
 }
 function renderHome(){
+  renderToday();
   const b=best(),t=S.targets;
   const p=Math.min(100,Math.round(b.push/t.push*100));
   const s=Math.min(100,Math.round(b.sit/t.sit*100));
@@ -815,6 +940,7 @@ function exportCSV(){
 function fillSetup(){
   $('ps').value=S.profile.sex;$('pa').value=S.profile.age;
   $('tp').value=S.targets.push;$('tsu').value=S.targets.sit;$('tr').value=mmss(S.targets.run);$('vc').checked=S.voice;
+  $('rm-on').checked=S.remind.on;$('rm-time').value=S.remind.time||'18:00';
 }
 function saveSetup(){
   const run=parseT($('tr').value),p=parseInt($('tp').value,10),s=parseInt($('tsu').value,10);
@@ -850,12 +976,14 @@ setMock('pushups');
 renderHome();
 addEventListener('resize',()=>{chart();drawRoute()});
 if('serviceWorker' in navigator&&/^https?:$/.test(location.protocol))navigator.serviceWorker.register('sw.js').catch(()=>{});
+setInterval(checkReminder,30000);
+setTimeout(checkReminder,2000);
 if(!S.seen){
   setTimeout(async()=>{
     S.seen=true;save();
     const go=await modal({
       icon:'⚓',tone:'blue',title:'Welcome aboard',sub:'Quick setup before your first session',
-      html:`<ul class="list"><li>Enter your age, sex and official passing targets.</li><li>Runs use GPS and work offline. Wait for “GPS ready” before starting.</li><li>Mock tests count hands-free by tap pad or motion sensor.</li><li>Back up your data now and then.</li></ul>`,
+      html:`<ul class="list"><li>Enter your age, sex and official passing targets.</li><li>Runs use GPS and work offline. Wait for “GPS ready” before starting.</li><li>Mock tests count hands-free by tap pad or motion sensor.</li><li>Set a daily reminder in Setup, and back up your data now and then.</li></ul>`,
       actions:[{label:'Later',val:false},{label:'Set up now',cls:'pri',val:true}],dv:false
     });
     if(go)show('setup');
